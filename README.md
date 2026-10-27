@@ -7,9 +7,14 @@ Monorepo with a NestJS API (`apps/api`) and a Nuxt 3 web app (`apps/web`). Data 
 ```
 apps/
   api/   NestJS · class-validator · Swagger · Jest
-         src/{common,config,shared,data,documents,schedules,flight-hours}
+         src/{common,config,shared,data,auth,pilot,documents,schedules,flight-hours}
   web/   Nuxt 3 (SPA) · Pinia · Tailwind · Chart.js (vue-chartjs)
 ```
+
+> **Deviation from the brief:** the brief asks for top-level `/nuxt` and `/nest` folders. The
+> repository was supplied as an npm-workspaces monorepo with `apps/api` and `apps/web` already
+> wired (shared lockfile, shared type definitions), so those names were kept. Nothing else about the
+> structure is affected.
 
 ## Run it
 
@@ -35,19 +40,31 @@ npm run build                                 # production builds
 | `PORT` | api | `3001` | API port |
 | `APP_TODAY` | api | `2026-05-31` | The "today" for every calculation. The system clock is never used |
 | `CORS_ORIGINS` | api | `http://localhost:3000` | Comma-separated allowed origins |
-| `NUXT_PUBLIC_API_BASE` | web | `http://localhost:3001/api` | API base URL |
+| `NUXT_PUBLIC_API_BASE` | web | `http://127.0.0.1:3001/api` | Base URL of the API, including the `/api` prefix |
+
+`APP_TODAY` is validated at boot (a malformed date throws with a readable message). Every endpoint
+also accepts `?today=YYYY-MM-DD` to override it per request — that is how the boundary cases below
+were tested without touching config.
+
+`NUXT_PUBLIC_API_BASE` uses `127.0.0.1` rather than `localhost` on purpose: on a dual-stack host
+`localhost` can resolve to `::1` while the API listens on IPv4, which surfaces in the browser as a
+confusing "Cannot reach the API".
 
 ## Endpoints
 
-Prefix `/api`, documented with Swagger at `/api/docs`. Every endpoint also accepts `?today=YYYY-MM-DD` to override `APP_TODAY` (for testing).
-Invalid query params return `400` with a readable message, e.g. `{"message":["range must be one of: 1w, 1m, 3m, 6m, 1y"],"error":"Bad Request","statusCode":400}`. Unknown query params are rejected too.
+Prefix `/api`, documented with Swagger at `/api/docs`. Every endpoint except `POST /api/auth/login`
+requires an `Authorization: Bearer <access token>` header; a missing or invalid token returns `401`.
+Invalid query params return `400` with a readable message, e.g. `{"message":["range must be one of: 1w, 1m, 3m, 6m, 1y"],"error":"Bad Request","statusCode":400}`. Unknown query params are rejected too (whitelist + `forbidNonWhitelisted`), so a typo cannot silently return unfiltered data.
 
-| Endpoint | Returns |
-|---|---|
-| `GET /api/documents` | Documents with `daysRemaining` and `status` (`expired \| soon \| safe`), sorted by urgency, plus `summary` counts |
-| `GET /api/schedules?month=YYYY-MM` | Duties of that month (default: month of today) plus `legend` |
-| `GET /api/flight-hours/summary` | Pilot, total hours, `limits`, current usage (today / 7 / 30 / 365 days) with `%` and status |
-| `GET /api/flight-hours/chart?range=1w\|1m\|3m\|6m\|1y` | `series` (15 points, today centred) + `limit` + `max` (default range `1w`) |
+| Method | Endpoint | Returns |
+|---|---|---|
+| `POST` | `/api/auth/login` | `{ token }` for the seeded pilot (`johndoe` / `susiairtest`); bad credentials → `401` with the **same message** for unknown user and wrong password (no account enumeration) |
+| `GET` | `/api/pilot/me` | `{ name, totalFlightHours, avatarUrl }` |
+| `GET` | `/api/flight-hours?from&to` | Daily hours inside the range |
+| `GET` | `/api/flight-hours/summary` | Pilot, total hours, `limits`, current usage (today / 7 / 30 / 365 days) with `%` and status |
+| `GET` | `/api/flight-hours/chart?range=1w\|1m\|3m\|6m\|1y` | `series` (15 points, today centred) + `limit` + `max` (default range `1w`) |
+| `GET` | `/api/documents` | Documents with `daysRemaining` and `status` (`expired \| soon \| safe`), sorted by urgency, plus `summary` counts |
+| `GET` | `/api/schedules?year=YYYY&month=M` (or `?month=YYYY-MM`) | Duties of that month (default: month of today) plus `legend` |
 
 Response types: [`apps/api/src/shared/api-types.ts`](apps/api/src/shared/api-types.ts). It is type-only and is the single definition used by both apps (the web app imports it through the `@shared` alias, re-exported from `apps/web/types`).
 
@@ -131,5 +148,35 @@ Response types: [`apps/api/src/shared/api-types.ts`](apps/api/src/shared/api-typ
 - Accessibility: status always has an icon and text next to colour; calendar is an ARIA grid with a single tab stop and arrow-key navigation; range tabs are a real `tablist`; gauges are `progressbar`s with readable text; the chart has an `sr-only` data table; focus rings and reduced-motion are respected.
 - Font **Plus Jakarta Sans** loads from Google Fonts with a system-sans fallback, so the app still works offline.
 
-## Out of scope (by design)
-No auth, no database, no additional pages.
+## Deployment
+
+Config for both hosts is committed; no hosting account was available in the working environment, so
+the live URLs are the one remaining step.
+
+- **API — Render** (`render.yaml`, root directory = repo root): build `npm ci && npm run build -w apps/api`,
+  start `node apps/api/dist/main.js`, with `APP_TODAY`, `CORS_ORIGINS` (set to the deployed frontend
+  origin) and `NODE_VERSION=20`. Any Node host works — no database, no persistent disk.
+- **Web — Vercel** (`vercel.json`): build `npm run build -w apps/web`, output `apps/web/.output/public`,
+  with `NUXT_PUBLIC_API_BASE` set to the deployed API URL at build time.
+
+After both are up, the API's `CORS_ORIGINS` must list the frontend origin and `/signin` must be
+re-tested end to end against the live pair.
+
+## What I would do with more time
+
+1. **Real auth** — hashed passwords, refresh tokens, per-pilot data instead of one seeded account, so
+   `/pilot/me` is not effectively a constant.
+2. **A write path for schedules and logbooks.** The app is read-only today; the missing half of the
+   workflow is a pilot logging a flight and the day's completeness indicator updating from that write
+   instead of from the mock file.
+3. **Swap the JSON repositories for a database** (the repository interfaces and injection tokens are
+   already the seam) and turn the mock files into seed fixtures.
+4. **Web-app tests.** The backend has 47 cases; the frontend is covered manually. Highest value:
+   component tests for the calendar-day indicator and the chart's `partial` rendering, plus one
+   Playwright run through sign-in → home → schedule.
+5. **Deploy + CI** (typecheck, tests, build on every push) so a reviewer does not have to clone the
+   repo to see it work.
+6. **Remember the chart range** across reloads, and give a month with no duties an empty state that
+   offers the nearest month that has some.
+7. **A real detail page** for a tapped date — currently the placeholder the brief asks for; it should
+   list that day's duties and let the pilot attach logbook entries.

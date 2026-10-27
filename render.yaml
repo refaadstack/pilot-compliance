@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: pilot-compliance-api
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: npm ci && npm run build -w apps/api
+    startCommand: node apps/api/dist/main.js
+    healthCheckPath: /api/docs
+    envVars:
+      - key: APP_TODAY
+        value: 2026-05-31
+      - key: CORS_ORIGINS
+        sync: false
+      - key: NODE_VERSION
+        value: 20
